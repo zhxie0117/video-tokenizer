@@ -74,7 +74,7 @@ class Encoder(nn.Module):
         x = x[:, :self.out_tokens]
         probs = self.prob_head(x)
         x = self.proj_out(x)
-        return x,probs
+        return x, probs.view(B, self.out_tokens)
 
 
 class Decoder(nn.Module):
