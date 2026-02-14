@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from models.model_new.base.transformer import ResidualAttentionBlock
 from models.model_new.base.utils import get_model_dims, init_weights
-from models.model_new.base.rope import get_freqs
+from models.model_new.base.rope import get_freqs,get_freqs_multi
 
 from einops.layers.torch import Rearrange
 from einops import rearrange
@@ -149,6 +149,8 @@ class Decoder(nn.Module):
         return x
 
 
+
+
 class Decoder_unify(nn.Module):
     def __init__(
             self,
@@ -156,9 +158,9 @@ class Decoder_unify(nn.Module):
             patch_size=(4, 8, 8),
             in_channels=5,
             out_channels=3,
-            in_tokens=2048,
-            cond_tokens=0,
-            out_grid=(32, 256, 256),
+            in_tokens=1024,   
+            cond_tokens=256,  
+            out_grid=(16, 128, 128),
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -167,24 +169,38 @@ class Decoder_unify(nn.Module):
         self.in_tokens = in_tokens
         self.cond_tokens = cond_tokens
 
+        # [16, 128, 128] / [4, 8, 8] = [4, 16, 16]
+        # self.grid 必须是一个 List [T, H, W]
         self.grid = [x // y for x, y in zip(out_grid, patch_size)]
-        self.grid_size = math.prod(self.grid)
+        self.grid_size = math.prod(self.grid) 
+        
         self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
         scale = self.width ** -0.5
 
-        # 1. Main Latent Projector
+        # ... (Projectors 代码保持不变) ...
         self.proj_in = nn.Linear(self.token_size, self.width, bias=True)
-
-        # 2. Condition Projector
         if self.cond_tokens > 0:
             self.proj_cond = nn.Linear(self.token_size, self.width, bias=True)
-
-        # 3. Mask Token
         self.mask_token = nn.Parameter(scale * torch.randn(1, 1, 1))
 
-        # 4. RoPE Freqs
-        total_context_len = in_tokens + cond_tokens
-        self.freqs = get_freqs(total_context_len, self.grid, head_dim=self.width // self.heads)
+        # ==================== 重点修改部分 ====================
+        # 构建 RoPE Config
+        rope_config = [[256, [1, 16, 16]], [1024, [4,16, 16]]]
+
+
+        
+        # 调试打印 (如果再次报错，取消注释查看结构)
+        # print(f"RoPE Config Structure: {rope_config}")
+        # 预期输出: [[256, [1, 16, 16]], [1024, [4, 16, 16]], [1024, [4, 16, 16]]]
+
+        # 生成频率
+        freqs_list = get_freqs_multi(
+            in_seqs=rope_config, 
+            head_dim=self.width // self.heads
+        )
+        #self.register_buffer('freqs', torch.cat(freqs_list, dim=0))
+        self.freqs = torch.cat(freqs_list, dim=0)
+        # ====================================================
 
         self.model_layers = ResidualAttentionBlock(
             embed_dim=self.width,
@@ -193,7 +209,6 @@ class Decoder_unify(nn.Module):
             num_layer=self.num_layers
         )
 
-        # ========== 改动：Linear → ConvTranspose3d ==========
         self.proj_out = nn.ConvTranspose3d(
             in_channels=self.width,
             out_channels=out_channels,
@@ -201,56 +216,143 @@ class Decoder_unify(nn.Module):
             stride=patch_size,
             bias=True,
         )
-        # =====================================================
 
         self.apply(init_weights)
 
     def forward(self, x, cond=None):
-        # x: [B, in_tokens, C]
-        # cond: [B, cond_tokens, C] (Optional)
+        # ... (Forward 代码保持不变) ...
         B = x.shape[0]
-        device = x.device
-
-        # --- 1. 处理主 Latents ---
         x = self.proj_in(x)
-
         tokens_list = []
 
-        # --- 2. 处理 Condition ---
         if self.cond_tokens > 0 and cond is not None:
             cond = self.proj_cond(cond)
             tokens_list.append(cond)
-        elif self.cond_tokens > 0 and cond is None:
-            raise ValueError(
-                f"Model initialized with cond_tokens={self.cond_tokens}, but no cond provided."
-            )
-
-        # --- 3. 拼接序列 ---
+        
         tokens_list.append(x)
 
         mask_tokens = self.mask_token.expand(B, self.grid_size, self.width)
         tokens_list.append(mask_tokens)
 
-        x_full = torch.cat(tokens_list, dim=1)  # [B, cond+in+grid, W]
-
-        # --- 4. Transformer Forward ---
+        x_full = torch.cat(tokens_list, dim=1)
+        device = x_full.device
+        # 确保传入 freqs
+        print(f"Decoder_unify forward: x_full shape={x_full.shape}, freqs shape={self.freqs.shape}")
         x_out = self.model_layers(x_full, freqs=self.freqs.to(device))
 
-        # --- 5. 切片获取输出 ---
         prefix_len = self.in_tokens + (self.cond_tokens if cond is not None else 0)
-        x_out = x_out[:, prefix_len:]  # [B, grid_size, width]
+        x_out = x_out[:, prefix_len:]
 
-        # ========== 改动：ConvTranspose3d unpatchify ==========
-        # [B, grid_size, width] → [B, width, T', H', W']
         x_out = rearrange(
             x_out, 'b (t h w) c -> b c t h w',
             t=self.grid[0], h=self.grid[1], w=self.grid[2],
         )
-        # [B, width, T', H', W'] → [B, out_channels, T, H, W]
         x_out = self.proj_out(x_out)
-        # =====================================================
+        return x_out
 
-        return x_out 
+
+# class Decoder_unify(nn.Module):
+#     def __init__(
+#             self,
+#             model_size="tiny",
+#             patch_size=(4, 8, 8),
+#             in_channels=5,
+#             out_channels=3,
+#             in_tokens=2048,
+#             cond_tokens=0,
+#             out_grid=(32, 256, 256),
+#     ):
+#         super().__init__()
+#         self.patch_size = patch_size
+#         self.token_size = in_channels
+#         self.in_channels = out_channels
+#         self.in_tokens = in_tokens
+#         self.cond_tokens = cond_tokens
+
+#         self.grid = [x // y for x, y in zip(out_grid, patch_size)]
+#         self.grid_size = math.prod(self.grid)
+#         self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+#         scale = self.width ** -0.5
+
+#         # 1. Main Latent Projector
+#         self.proj_in = nn.Linear(self.token_size, self.width, bias=True)
+
+#         # 2. Condition Projector
+#         if self.cond_tokens > 0:
+#             self.proj_cond = nn.Linear(self.token_size, self.width, bias=True)
+
+#         # 3. Mask Token
+#         self.mask_token = nn.Parameter(scale * torch.randn(1, 1, 1))
+
+#         # 4. RoPE Freqs
+#         total_context_len = in_tokens + cond_tokens
+#         self.freqs = get_freqs(total_context_len, self.grid, head_dim=self.width // self.heads)
+
+#         self.model_layers = ResidualAttentionBlock(
+#             embed_dim=self.width,
+#             heads=self.heads,
+#             mlp_ratio=mlp_ratio,
+#             num_layer=self.num_layers
+#         )
+
+#         # ========== 改动：Linear → ConvTranspose3d ==========
+#         self.proj_out = nn.ConvTranspose3d(
+#             in_channels=self.width,
+#             out_channels=out_channels,
+#             kernel_size=patch_size,
+#             stride=patch_size,
+#             bias=True,
+#         )
+#         # =====================================================
+
+#         self.apply(init_weights)
+
+#     def forward(self, x, cond=None):
+#         # x: [B, in_tokens, C]
+#         # cond: [B, cond_tokens, C] (Optional)
+#         B = x.shape[0]
+#         device = x.device
+
+#         # --- 1. 处理主 Latents ---
+#         x = self.proj_in(x)
+
+#         tokens_list = []
+
+#         # --- 2. 处理 Condition ---
+#         if self.cond_tokens > 0 and cond is not None:
+#             cond = self.proj_cond(cond)
+#             tokens_list.append(cond)
+#         elif self.cond_tokens > 0 and cond is None:
+#             raise ValueError(
+#                 f"Model initialized with cond_tokens={self.cond_tokens}, but no cond provided."
+#             )
+
+#         # --- 3. 拼接序列 ---
+#         tokens_list.append(x)
+
+#         mask_tokens = self.mask_token.expand(B, self.grid_size, self.width)
+#         tokens_list.append(mask_tokens)
+
+#         x_full = torch.cat(tokens_list, dim=1)  # [B, cond+in+grid, W]
+
+#         # --- 4. Transformer Forward ---
+#         x_out = self.model_layers(x_full, freqs=self.freqs.to(device))
+
+#         # --- 5. 切片获取输出 ---
+#         prefix_len = self.in_tokens + (self.cond_tokens if cond is not None else 0)
+#         x_out = x_out[:, prefix_len:]  # [B, grid_size, width]
+
+#         # ========== 改动：ConvTranspose3d unpatchify ==========
+#         # [B, grid_size, width] → [B, width, T', H', W']
+#         x_out = rearrange(
+#             x_out, 'b (t h w) c -> b c t h w',
+#             t=self.grid[0], h=self.grid[1], w=self.grid[2],
+#         )
+#         # [B, width, T', H', W'] → [B, out_channels, T, H, W]
+#         x_out = self.proj_out(x_out)
+#         # =====================================================
+
+#         return x_out 
     
 # class Encoder(nn.Module):
 #     def __init__(

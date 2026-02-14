@@ -34,14 +34,7 @@ class Encoder(nn.Module):
         self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
         scale = self.width ** -0.5
 
-        # ========== 改动：Linear → Conv3d ==========
-        # self.proj_in = nn.Conv3d(
-        #     in_channels=in_channels,
-        #     out_channels=self.width,
-        #     kernel_size=patch_size,
-        #     stride=patch_size,
-        #     bias=True,
-        # )
+
         self.cnn_encoder = Encoder_cnn(
             in_channels=3, 
             ch=32, 

@@ -323,7 +323,10 @@ class LARPTokenizerTrainer(BaseTrainer):
                 loss = loss + loss_kl * current_kl_weight
                 info_dict['loss_kl'] = loss_kl.item()
                 info_dict['kl_weight'] = current_kl_weight
-
+            if 'align_loss' in model_output:
+                align_loss = model_output.pop('align_loss')
+                loss = loss + align_loss*0.2
+                info_dict['align_loss'] = align_loss.item()
             if 'loss_q' in model_output:
                 loss_q = model_output.pop('loss_q')
                 loss = loss + loss_q * self.get_loss_q_weight()

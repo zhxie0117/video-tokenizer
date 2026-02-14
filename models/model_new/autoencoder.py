@@ -169,7 +169,7 @@ class AutoEncoder(nn.Module):
 
 
 
-@register('autoencoder_first_token_f256t1024')
+@register('autoencoder_first_token_f256t1024a')
 class AutoEncoder_first_token(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -179,7 +179,7 @@ class AutoEncoder_first_token(nn.Module):
         
         # 主编码器：处理整个视频流（或者侧重于时间变化）
         self.encoder = Encoder(
-            model_size='base',
+            model_size='small_thin',
             patch_size=[4, 8, 8],
             in_channels=3,
             out_channels=token_size,
@@ -190,7 +190,7 @@ class AutoEncoder_first_token(nn.Module):
         # 第一帧编码器：专门提供高保真的空间参考
         # out_tokens=256 (1x128x128 grid -> patch 1x8x8 -> 16x16 tokens = 256)
         self.encoder1 = Encoder(
-            model_size='base',
+            model_size='small_thin',
             patch_size=[1, 8, 8],
             in_channels=3,
             out_channels=token_size,
@@ -202,7 +202,7 @@ class AutoEncoder_first_token(nn.Module):
         
         # 这里的 cond_tokens 对应 encoder1 的 out_tokens
         self.decoder = Decoder_unify(
-            model_size='base',
+            model_size='small',
             patch_size=[4, 8, 8],
             in_channels=token_size,
             out_channels=3,
