@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from models.model_new.base.transformer import ResidualAttentionBlock
 from models.model_new.base.utils import get_model_dims, init_weights
 from models.model_new.base.rope import get_freqs,get_freqs_multi
-
+from models.model_new.base.simpletransformer import ResidualAttentionBlock1
 from einops.layers.torch import Rearrange
 from einops import rearrange
 import math
@@ -147,6 +147,542 @@ class Decoder(nn.Module):
         # =====================================================
 
         return x
+
+
+
+
+
+
+
+
+
+
+
+
+class Encoder3(nn.Module):
+    def __init__(
+            self,
+            model_size="tiny",
+            patch_size=(4, 8, 8),
+            in_channels=3,  # RGB
+            out_channels=5,  # len(fsq_levels)
+            in_grid=(32, 256, 256),
+            out_tokens=2048,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.token_size = out_channels
+        self.in_channels = in_channels
+        self.out_tokens = out_tokens
+        self.grid = [x // y for x, y in zip(in_grid, patch_size)]
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+        scale = self.width ** -0.5
+
+        # ========== 改动：Linear → Conv3d ==========
+        self.proj_in = nn.Conv3d(
+            in_channels=in_channels,
+            out_channels=self.width,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=True,
+        )
+        # ============================================
+
+        self.mask_token = nn.Parameter(scale * torch.randn(1, 1, 1))
+        self.freqs = get_freqs(out_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock1(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+
+        self.proj_out = nn.Linear(self.width, self.token_size, bias=True)
+        self.apply(init_weights)
+
+    def forward(self, x):
+        # x: [B, C, T, H, W]
+        B = x.shape[0]
+        device = x.device
+
+        # ========== 改动：Conv3d patchify ==========
+        # [B, C, T, H, W] → [B, width, T', H', W']
+        x = self.proj_in(x)
+        # [B, width, T', H', W'] → [B, T'*H'*W', width]
+        x = rearrange(x, 'b c t h w -> b (t h w) c')
+        # ============================================
+
+        mask_tokens = self.mask_token.expand(B, self.out_tokens, self.width)
+        x = torch.cat([mask_tokens, x], dim=1)
+
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+
+        x = x[:, :self.out_tokens]
+        x = self.proj_out(x)
+        return x
+
+
+class Decoder3(nn.Module):
+    def __init__(
+            self,
+            model_size="tiny",
+            patch_size=(4, 8, 8),
+            in_channels=5,
+            out_channels=3,
+            in_tokens=2048,
+            out_grid=(32, 256, 256),
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.token_size = in_channels
+        self.in_channels = out_channels
+        self.in_tokens = in_tokens
+        self.grid = [x // y for x, y in zip(out_grid, patch_size)]
+        self.grid_size = math.prod(self.grid)
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+        scale = self.width ** -0.5
+
+        self.proj_in = nn.Linear(self.token_size, self.width, bias=True)
+        self.mask_token = nn.Parameter(scale * torch.randn(1, 1, 1))
+        self.freqs = get_freqs(in_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock1(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+
+        # ========== 改动：Linear → ConvTranspose3d ==========
+        self.proj_out = nn.ConvTranspose3d(
+            in_channels=self.width,
+            out_channels=out_channels,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=True,
+        )
+        # =====================================================
+        self.apply(init_weights)
+
+    def forward(self, x):
+        # x: quantized latent tokens [B, in_tokens, C]
+        B = x.shape[0]
+        device = x.device
+        x = self.proj_in(x)
+        mask_tokens = self.mask_token.expand(B, self.grid_size, self.width)
+        x = torch.cat([x, mask_tokens], dim=1)
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+        x = x[:, self.in_tokens:]  # [B, grid_size, width]
+
+        # ========== 改动：ConvTranspose3d unpatchify ==========
+        # [B, grid_size, width] → [B, width, T', H', W']
+        x = rearrange(
+            x, 'b (t h w) c -> b c t h w',
+            t=self.grid[0], h=self.grid[1], w=self.grid[2],
+        )
+        # [B, width, T', H', W'] → [B, out_channels, T, H, W]
+        x = self.proj_out(x)
+        # =====================================================
+
+        return x
+
+
+
+
+
+#mask2
+class Encoder1(nn.Module):
+    def __init__(
+            self,
+            model_size="tiny",
+            patch_size=(4, 8, 8),
+            in_channels=3,  # RGB
+            out_channels=5,  # len(fsq_levels)
+            in_grid=(32, 256, 256),
+            out_tokens=2048,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.token_size = out_channels
+        self.in_channels = in_channels
+        self.out_tokens = out_tokens
+        self.grid = [x // y for x, y in zip(in_grid, patch_size)]
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+        scale = self.width ** -0.5
+
+        # ========== 改动：Linear → Conv3d ==========
+        self.proj_in = nn.Conv3d(
+            in_channels=in_channels,
+            out_channels=self.width,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=True,
+        )
+        # ============================================
+
+        self.mask_token = nn.Parameter(scale * torch.randn(1, out_tokens, self.width))
+        self.freqs = get_freqs(out_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+
+        self.proj_out = nn.Linear(self.width, self.token_size, bias=True)
+        self.apply(init_weights)
+
+    def forward(self, x):
+        # x: [B, C, T, H, W]
+        B = x.shape[0]
+        device = x.device
+
+        # ========== 改动：Conv3d patchify ==========
+        # [B, C, T, H, W] → [B, width, T', H', W']
+        x = self.proj_in(x)
+        # [B, width, T', H', W'] → [B, T'*H'*W', width]
+        x = rearrange(x, 'b c t h w -> b (t h w) c')
+        # ============================================
+
+        mask_tokens = self.mask_token.expand(B, -1, -1)
+        x = torch.cat([mask_tokens, x], dim=1)
+
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+
+        x = x[:, :self.out_tokens]
+        x = self.proj_out(x)
+        return x
+
+
+class Decoder1(nn.Module):
+    def __init__(
+            self,
+            model_size="tiny",
+            patch_size=(4, 8, 8),
+            in_channels=5,
+            out_channels=3,
+            in_tokens=2048,
+            out_grid=(32, 256, 256),
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.token_size = in_channels
+        self.in_channels = out_channels
+        self.in_tokens = in_tokens
+        self.grid = [x // y for x, y in zip(out_grid, patch_size)]
+        self.grid_size = math.prod(self.grid)
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+        scale = self.width ** -0.5
+
+        self.proj_in = nn.Linear(self.token_size, self.width, bias=True)
+        self.mask_token = nn.Parameter(scale * torch.randn(1, math.prod(self.grid), self.width)) 
+        self.freqs = get_freqs(in_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+
+        # ========== 改动：Linear → ConvTranspose3d ==========
+        self.proj_out = nn.ConvTranspose3d(
+            in_channels=self.width,
+            out_channels=out_channels,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=True,
+        )
+        # =====================================================
+
+        self.apply(init_weights)
+
+    def forward(self, x):
+        # x: quantized latent tokens [B, in_tokens, C]
+        B = x.shape[0]
+        device = x.device
+
+        x = self.proj_in(x)
+
+        mask_tokens = self.mask_token.expand(B, -1, -1)
+        x = torch.cat([x, mask_tokens], dim=1)
+
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+
+        x = x[:, self.in_tokens:]  # [B, grid_size, width]
+
+        x = rearrange(
+            x, 'b (t h w) c -> b c t h w',
+            t=self.grid[0], h=self.grid[1], w=self.grid[2],
+        )
+        # [B, width, T', H', W'] → [B, out_channels, T, H, W]
+        x = self.proj_out(x)
+        # =====================================================
+
+        return x
+
+#mask3
+class Encoder4(nn.Module):
+    def __init__(
+            self,
+            model_size="tiny",
+            patch_size=(4, 8, 8),
+            in_channels=3,  # RGB
+            out_channels=5,  # len(fsq_levels)
+            in_grid=(32, 256, 256),
+            out_tokens=2048,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.token_size = out_channels
+        self.in_channels = in_channels
+        self.out_tokens = out_tokens
+        self.grid = [x // y for x, y in zip(in_grid, patch_size)]
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+        scale = self.width ** -0.5
+
+        # ========== 改动：Linear → Conv3d ==========
+        self.proj_in = nn.Conv3d(
+            in_channels=in_channels,
+            out_channels=self.width,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=True,
+        )
+        # ============================================
+
+        self.mask_token = nn.Parameter(scale * torch.randn(1, 1, self.width))
+        self.freqs = get_freqs(out_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+
+        self.proj_out = nn.Linear(self.width, self.token_size, bias=True)
+        self.apply(init_weights)
+
+    def forward(self, x):
+        # x: [B, C, T, H, W]
+        B = x.shape[0]
+        device = x.device
+
+        # ========== 改动：Conv3d patchify ==========
+        # [B, C, T, H, W] → [B, width, T', H', W']
+        x = self.proj_in(x)
+        # [B, width, T', H', W'] → [B, T'*H'*W', width]
+        x = rearrange(x, 'b c t h w -> b (t h w) c')
+        # ============================================
+
+        mask_tokens = self.mask_token.expand(B,  self.out_tokens, -1)
+        x = torch.cat([mask_tokens, x], dim=1)
+
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+
+        x = x[:, :self.out_tokens]
+        x = self.proj_out(x)
+        return x
+
+
+class Decoder4(nn.Module):
+    def __init__(
+            self,
+            model_size="tiny",
+            patch_size=(4, 8, 8),
+            in_channels=5,
+            out_channels=3,
+            in_tokens=2048,
+            out_grid=(32, 256, 256),
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.token_size = in_channels
+        self.in_channels = out_channels
+        self.in_tokens = in_tokens
+        self.grid = [x // y for x, y in zip(out_grid, patch_size)]
+        self.grid_size = math.prod(self.grid)
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+        scale = self.width ** -0.5
+
+        self.proj_in = nn.Linear(self.token_size, self.width, bias=True)
+        self.mask_token = nn.Parameter(scale * torch.randn(1, 1, self.width)) 
+        self.freqs = get_freqs(in_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+
+        # ========== 改动：Linear → ConvTranspose3d ==========
+        self.proj_out = nn.ConvTranspose3d(
+            in_channels=self.width,
+            out_channels=out_channels,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=True,
+        )
+        # =====================================================
+
+        self.apply(init_weights)
+
+    def forward(self, x):
+        # x: quantized latent tokens [B, in_tokens, C]
+        B = x.shape[0]
+        device = x.device
+        x = self.proj_in(x)
+        mask_tokens = self.mask_token.expand(B, self.grid_size, -1)
+        x = torch.cat([x, mask_tokens], dim=1)
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+        x = x[:, self.in_tokens:]  # [B, grid_size, width]
+        x = rearrange(
+            x, 'b (t h w) c -> b c t h w',
+            t=self.grid[0], h=self.grid[1], w=self.grid[2],
+        )
+        # [B, width, T', H', W'] → [B, out_channels, T, H, W]
+        x = self.proj_out(x)
+        # =====================================================
+
+        return x
+
+
+
+class Encoder2(nn.Module):
+    def __init__(
+            self,
+            model_size="tiny",
+            patch_size=(4, 8, 8),
+            in_channels=3,  # RGB
+            out_channels=5,  # len(fsq_levels)
+            in_grid=(32, 256, 256),
+            out_tokens=2048,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.token_size = out_channels
+        self.in_channels = in_channels
+        self.out_tokens = out_tokens
+        self.grid = [x // y for x, y in zip(in_grid, patch_size)]
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+        scale = self.width ** -0.5
+
+        # ========== 改动：Linear → Conv3d ==========
+        self.proj_in = nn.Conv3d(
+            in_channels=in_channels,
+            out_channels=self.width,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=True,
+        )
+        # ============================================
+
+        self.mask_token = nn.Parameter(scale * torch.randn(1, out_tokens, self.width))
+        self.freqs = get_freqs(out_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock1(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+
+        self.proj_out = nn.Linear(self.width, self.token_size, bias=True)
+        self.apply(init_weights)
+
+    def forward(self, x):
+        # x: [B, C, T, H, W]
+        B = x.shape[0]
+        device = x.device
+
+        # ========== 改动：Conv3d patchify ==========
+        # [B, C, T, H, W] → [B, width, T', H', W']
+        x = self.proj_in(x)
+        # [B, width, T', H', W'] → [B, T'*H'*W', width]
+        x = rearrange(x, 'b c t h w -> b (t h w) c')
+        # ============================================
+
+        mask_tokens = self.mask_token.expand(B, -1, -1)
+        x = torch.cat([mask_tokens, x], dim=1)
+
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+
+        x = x[:, :self.out_tokens]
+        x = self.proj_out(x)
+        return x
+
+
+class Decoder2(nn.Module):
+    def __init__(
+            self,
+            model_size="tiny",
+            patch_size=(4, 8, 8),
+            in_channels=5,
+            out_channels=3,
+            in_tokens=2048,
+            out_grid=(32, 256, 256),
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.token_size = in_channels
+        self.in_channels = out_channels
+        self.in_tokens = in_tokens
+        self.grid = [x // y for x, y in zip(out_grid, patch_size)]
+        self.grid_size = math.prod(self.grid)
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+        scale = self.width ** -0.5
+
+        self.proj_in = nn.Linear(self.token_size, self.width, bias=True)
+        self.mask_token = nn.Parameter(scale * torch.randn(1, math.prod(self.grid), self.width)) 
+        self.freqs = get_freqs(in_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock1(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+
+        # ========== 改动：Linear → ConvTranspose3d ==========
+        self.proj_out = nn.ConvTranspose3d(
+            in_channels=self.width,
+            out_channels=out_channels,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=True,
+        )
+        # =====================================================
+
+        self.apply(init_weights)
+
+    def forward(self, x):
+        # x: quantized latent tokens [B, in_tokens, C]
+        B = x.shape[0]
+        device = x.device
+
+        x = self.proj_in(x)
+
+        mask_tokens = self.mask_token.expand(B, -1, -1)
+        x = torch.cat([x, mask_tokens], dim=1)
+
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+
+        x = x[:, self.in_tokens:]  # [B, grid_size, width]
+
+        x = rearrange(
+            x, 'b (t h w) c -> b c t h w',
+            t=self.grid[0], h=self.grid[1], w=self.grid[2],
+        )
+        # [B, width, T', H', W'] → [B, out_channels, T, H, W]
+        x = self.proj_out(x)
+        # =====================================================
+
+        return x
+
 
 
 

@@ -224,7 +224,7 @@ class VJepaAligner(nn.Module):
 # ==========================================
 # 3. AutoEncoder (修正版)
 # ==========================================
-@register('autoencoder_cnnvit_align')
+@register('autoencoder_cnnvit_align1')
 class AutoEncoder1(nn.Module):
     def __init__(self, 
         bottleneck,

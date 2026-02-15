@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
-from models.model_new.base.blocks import Encoder, Decoder ,Decoder_unify
+from models.model_new.base.blocks import Encoder, Decoder ,Decoder_unify, Encoder1, Decoder1, Encoder2, Decoder2,Encoder4, Decoder4, Encoder3, Decoder3
 from models.model_new.quantizer.fsq import FSQ
 from models import register
 
 
-@register('autoencoder_baseline')
+@register('autoencoder_convpatchify')
 class AutoEncoder(nn.Module):
     def __init__(self, 
         bottleneck,
@@ -49,7 +49,7 @@ class AutoEncoder(nn.Module):
         token_size = 6
 
         self.encoder = Encoder(
-            model_size='small',
+            model_size='base',
             patch_size=[4, 8, 8],
             in_channels=3,
             out_channels=token_size,
@@ -58,6 +58,254 @@ class AutoEncoder(nn.Module):
         )
         self.quantize = FSQ(levels=[8, 8,8, 5, 5, 5])
         self.decoder = Decoder(
+            model_size='base',
+            patch_size=[4, 8, 8],
+            in_channels=token_size,
+            out_channels=3,
+            in_tokens=1024,
+            out_grid=in_grid,
+        )
+        self.prior_model = None 
+    def encode(self, data, **kwargs):
+        x_first = data[:, :, 0:1, :, :]  # [B, C, 1, H, W]
+        x = self.encoder(data)
+        x_q, x_dict = self.quantize(x)
+        return x_q, x_dict
+    
+    def decode(self, x):
+        x = self.decoder(x)
+        return x
+    
+    def decode_indices(self, indices):
+        x_q = self.quantize.indices_to_codes(indices).to(indices.device, next(self.decoder.parameters()).dtype)
+        return self.decoder(x_q)
+    
+    def forward(self, x):
+        x_q, out_dict = self.encode(x)
+        x = self.decode(x_q)
+        return_dict = {'pred_frames': x.contiguous()}
+        return return_dict
+
+@register('autoencoder_convpatchify_greatfsq')
+class AutoEncoder(nn.Module):
+    def __init__(self, 
+        bottleneck,
+        prior_model,
+        # --- Token 数量配置 ---
+        num_latent_tokens=1024,    # 原本是 128+256，现在统一为一个总数
+        
+        # --- 尺寸配置 ---
+        input_size=128,
+        frame_num=16,             # 统一处理的帧数
+        temporal_patch_size=4,    # 时间维度的 Patch Size bottleneck_token_num
+        patch_size=8,
+        decoder_temporal_patch_size=4,
+        decoder_patch_size=8,
+        in_channels=3,
+
+        # --- 模型配置 ---
+        transformer_name='transformer_encoder_parallel',
+        encoder_name=None,
+        decoder_name=None,
+        encoder_hidden_size=768,
+        decoder_hidden_size=768,
+        
+        encoder_num_heads=12,
+        decoder_num_heads=12,
+        encoder_depth=6,
+        decoder_depth=6,
+
+        # --- Embedding 配置 ---
+        latent_pe_scale_factor=10000,
+        query_init_std=0.02,
+        encoder_query_gaussian_init=True,
+        
+        # --- Boolean Flags ---
+        learned_decoder_latent_pe=False,
+        
+        **kwargs):
+        super().__init__()
+
+        in_grid =  [16, 128, 128]
+        token_size = 8
+
+        self.encoder = Encoder(
+            model_size='base',
+            patch_size=[4, 8, 8],
+            in_channels=3,
+            out_channels=token_size,
+            in_grid=in_grid,
+            out_tokens=1024,
+        )
+        self.quantize = FSQ(levels=[8, 8,8,8,5, 5, 5, 5])
+        self.decoder = Decoder(
+            model_size='base',
+            patch_size=[4, 8, 8],
+            in_channels=token_size,
+            out_channels=3,
+            in_tokens=1024,
+            out_grid=in_grid,
+        )
+        self.prior_model = None 
+    def encode(self, data, **kwargs):
+        x_first = data[:, :, 0:1, :, :]  # [B, C, 1, H, W]
+        x = self.encoder(data)
+        x_q, x_dict = self.quantize(x)
+        return x_q, x_dict
+    
+    def decode(self, x):
+        x = self.decoder(x)
+        return x
+    
+    def decode_indices(self, indices):
+        x_q = self.quantize.indices_to_codes(indices).to(indices.device, next(self.decoder.parameters()).dtype)
+        return self.decoder(x_q)
+    
+    def forward(self, x):
+        x_q, out_dict = self.encode(x)
+        x = self.decode(x_q)
+        return_dict = {'pred_frames': x.contiguous()}
+        return return_dict
+
+
+
+
+@register('autoencoder_mask3')
+class AutoEncoder(nn.Module):
+    def __init__(self, 
+        bottleneck,
+        prior_model,
+        # --- Token 数量配置 ---
+        num_latent_tokens=1024,    # 原本是 128+256，现在统一为一个总数
+        
+        # --- 尺寸配置 ---
+        input_size=128,
+        frame_num=16,             # 统一处理的帧数
+        temporal_patch_size=4,    # 时间维度的 Patch Size bottleneck_token_num
+        patch_size=8,
+        decoder_temporal_patch_size=4,
+        decoder_patch_size=8,
+        in_channels=3,
+
+        # --- 模型配置 ---
+        transformer_name='transformer_encoder_parallel',
+        encoder_name=None,
+        decoder_name=None,
+        encoder_hidden_size=768,
+        decoder_hidden_size=768,
+        
+        encoder_num_heads=12,
+        decoder_num_heads=12,
+        encoder_depth=6,
+        decoder_depth=6,
+
+        # --- Embedding 配置 ---
+        latent_pe_scale_factor=10000,
+        query_init_std=0.02,
+        encoder_query_gaussian_init=True,
+        
+        # --- Boolean Flags ---
+        learned_decoder_latent_pe=False,
+        
+        **kwargs):
+        super().__init__()
+
+        in_grid =  [16, 128, 128]
+        token_size = 6
+
+        self.encoder = Encoder4(
+            model_size='base',
+            patch_size=[4, 8, 8],
+            in_channels=3,
+            out_channels=token_size,
+            in_grid=in_grid,
+            out_tokens=1024,
+        )
+        self.quantize = FSQ(levels=[8, 8,8, 5, 5, 5])
+        self.decoder = Decoder4(
+            model_size='base',
+            patch_size=[4, 8, 8],
+            in_channels=token_size,
+            out_channels=3,
+            in_tokens=1024,
+            out_grid=in_grid,
+        )
+        self.prior_model = None 
+    def encode(self, data, **kwargs):
+        x_first = data[:, :, 0:1, :, :]  # [B, C, 1, H, W]
+        x = self.encoder(data)
+        x_q, x_dict = self.quantize(x)
+        return x_q, x_dict
+    
+    def decode(self, x):
+        x = self.decoder(x)
+        return x
+    
+    def decode_indices(self, indices):
+        x_q = self.quantize.indices_to_codes(indices).to(indices.device, next(self.decoder.parameters()).dtype)
+        return self.decoder(x_q)
+    
+    def forward(self, x):
+        x_q, out_dict = self.encode(x)
+        x = self.decode(x_q)
+        return_dict = {'pred_frames': x.contiguous()}
+        return return_dict
+
+
+
+@register('autoencoder_convpatchify_mask2')
+class AutoEncoder(nn.Module):
+    def __init__(self, 
+        bottleneck,
+        prior_model,
+        # --- Token 数量配置 ---
+        num_latent_tokens=1024,    # 原本是 128+256，现在统一为一个总数
+        
+        # --- 尺寸配置 ---
+        input_size=128,
+        frame_num=16,             # 统一处理的帧数
+        temporal_patch_size=4,    # 时间维度的 Patch Size bottleneck_token_num
+        patch_size=8,
+        decoder_temporal_patch_size=4,
+        decoder_patch_size=8,
+        in_channels=3,
+
+        # --- 模型配置 ---
+        transformer_name='transformer_encoder_parallel',
+        encoder_name=None,
+        decoder_name=None,
+        encoder_hidden_size=768,
+        decoder_hidden_size=768,
+        
+        encoder_num_heads=12,
+        decoder_num_heads=12,
+        encoder_depth=6,
+        decoder_depth=6,
+
+        # --- Embedding 配置 ---
+        latent_pe_scale_factor=10000,
+        query_init_std=0.02,
+        encoder_query_gaussian_init=True,
+        
+        # --- Boolean Flags ---
+        learned_decoder_latent_pe=False,
+        
+        **kwargs):
+        super().__init__()
+
+        in_grid =  [16, 128, 128]
+        token_size = 6
+
+        self.encoder = Encoder1(
+            model_size='small',
+            patch_size=[4, 8, 8],
+            in_channels=3,
+            out_channels=token_size,
+            in_grid=in_grid,
+            out_tokens=1024,
+        )
+        self.quantize = FSQ(levels=[8, 8,8, 5, 5, 5])
+        self.decoder = Decoder1(
             model_size='small',
             patch_size=[4, 8, 8],
             in_channels=token_size,
@@ -85,6 +333,258 @@ class AutoEncoder(nn.Module):
         x = self.decode(x_q)
         return_dict = {'pred_frames': x.contiguous()}
         return return_dict
+
+@register('autoencoder_convpatchify_mask2_greatfsq')
+class AutoEncoder(nn.Module):
+    def __init__(self, 
+        bottleneck,
+        prior_model,
+        # --- Token 数量配置 ---
+        num_latent_tokens=1024,    # 原本是 128+256，现在统一为一个总数
+        
+        # --- 尺寸配置 ---
+        input_size=128,
+        frame_num=16,             # 统一处理的帧数
+        temporal_patch_size=4,    # 时间维度的 Patch Size bottleneck_token_num
+        patch_size=8,
+        decoder_temporal_patch_size=4,
+        decoder_patch_size=8,
+        in_channels=3,
+
+        # --- 模型配置 ---
+        transformer_name='transformer_encoder_parallel',
+        encoder_name=None,
+        decoder_name=None,
+        encoder_hidden_size=768,
+        decoder_hidden_size=768,
+        
+        encoder_num_heads=12,
+        decoder_num_heads=12,
+        encoder_depth=6,
+        decoder_depth=6,
+
+        # --- Embedding 配置 ---
+        latent_pe_scale_factor=10000,
+        query_init_std=0.02,
+        encoder_query_gaussian_init=True,
+        
+        # --- Boolean Flags ---
+        learned_decoder_latent_pe=False,
+        
+        **kwargs):
+        super().__init__()
+
+        in_grid =  [16, 128, 128]
+        token_size = 8
+
+        self.encoder = Encoder1(
+            model_size='small',
+            patch_size=[4, 8, 8],
+            in_channels=3,
+            out_channels=token_size,
+            in_grid=in_grid,
+            out_tokens=1024,
+        )
+        self.quantize = FSQ(levels=[8, 8,8,8,5, 5, 5, 5])
+        self.decoder = Decoder1(
+            model_size='small',
+            patch_size=[4, 8, 8],
+            in_channels=token_size,
+            out_channels=3,
+            in_tokens=1024,
+            out_grid=in_grid,
+        )
+        self.prior_model = None 
+    def encode(self, data, **kwargs):
+        x = self.encoder(data)
+        x_q, x_dict = self.quantize(x)
+        return x_q, x_dict
+    
+    def decode(self, x):
+        x = self.decoder(x)
+        return x
+    
+    def decode_indices(self, indices):
+        x_q = self.quantize.indices_to_codes(indices).to(indices.device, next(self.decoder.parameters()).dtype)
+        return self.decoder(x_q)
+    
+    def forward(self, x):
+        x_q, out_dict = self.encode(x)
+        x = self.decode(x_q)
+        return_dict = {'pred_frames': x.contiguous()}
+        return return_dict
+
+
+@register('autoencoder_convpatchify_simplytransformer')
+class AutoEncoder(nn.Module):
+    def __init__(self, 
+        bottleneck,
+        prior_model,
+        # --- Token 数量配置 ---
+        num_latent_tokens=1024,    # 原本是 128+256，现在统一为一个总数
+        
+        # --- 尺寸配置 ---
+        input_size=128,
+        frame_num=16,             # 统一处理的帧数
+        temporal_patch_size=4,    # 时间维度的 Patch Size bottleneck_token_num
+        patch_size=8,
+        decoder_temporal_patch_size=4,
+        decoder_patch_size=8,
+        in_channels=3,
+
+        # --- 模型配置 ---
+        transformer_name='transformer_encoder_parallel',
+        encoder_name=None,
+        decoder_name=None,
+        encoder_hidden_size=768,
+        decoder_hidden_size=768,
+        
+        encoder_num_heads=12,
+        decoder_num_heads=12,
+        encoder_depth=6,
+        decoder_depth=6,
+
+        # --- Embedding 配置 ---
+        latent_pe_scale_factor=10000,
+        query_init_std=0.02,
+        encoder_query_gaussian_init=True,
+        
+        # --- Boolean Flags ---
+        learned_decoder_latent_pe=False,
+        
+        **kwargs):
+        super().__init__()
+
+        in_grid =  [16, 128, 128]
+        token_size = 6
+
+        self.encoder = Encoder3(
+            model_size='base',
+            patch_size=[4, 8, 8],
+            in_channels=3,
+            out_channels=token_size,
+            in_grid=in_grid,
+            out_tokens=1024,
+        )
+        self.quantize = FSQ(levels=[8, 8,8, 5, 5, 5])
+        self.decoder = Decoder3(
+            model_size='base',
+            patch_size=[4, 8, 8],
+            in_channels=token_size,
+            out_channels=3,
+            in_tokens=1024,
+            out_grid=in_grid,
+        )
+        self.prior_model = None 
+    def encode(self, data, **kwargs):
+        x_first = data[:, :, 0:1, :, :]  # [B, C, 1, H, W]
+        x = self.encoder(data)
+        x_q, x_dict = self.quantize(x)
+        return x_q, x_dict
+    
+    def decode(self, x):
+        x = self.decoder(x)
+        return x
+    
+    def decode_indices(self, indices):
+        x_q = self.quantize.indices_to_codes(indices).to(indices.device, next(self.decoder.parameters()).dtype)
+        return self.decoder(x_q)
+    
+    def forward(self, x):
+        x_q, out_dict = self.encode(x)
+        x = self.decode(x_q)
+        return_dict = {'pred_frames': x.contiguous()}
+        return return_dict
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 @register('autoencoder_large')
 class AutoEncoder(nn.Module):

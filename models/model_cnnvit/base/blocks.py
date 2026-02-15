@@ -37,7 +37,7 @@ class Encoder(nn.Module):
 
         self.cnn_encoder = Encoder_cnn(
             in_channels=3, 
-            ch=32, 
+            ch=64, 
             ch_mult=(1, 2, 4, 4), # 产生 T/4, H/8, W/8
             z_channels=self.width # 确保 CNN 输出通道等于 Transformer 宽度
         )
@@ -112,7 +112,7 @@ class Decoder(nn.Module):
         # ========== 改动：Linear → ConvTranspose3d ==========
         self.cnn_decoder = Decoder_cnn(
             z_channels=self.width,
-            ch=32,
+            ch=64,
             ch_mult=(1, 2, 4, 4),
             out_channels=3
         )
