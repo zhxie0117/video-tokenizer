@@ -310,7 +310,7 @@ class SimpleVectorQuantizer(AbstractRegularizer):
             q_indices = q_indices.reshape(quantized.shape[0], quantized.shape[1])
 
         return_dict = {
-            'unregularized_z': z, # but l2 normalized if l2_normalized=True
+            'unregularized_z': z, # but l2 normalized if l2_normalized=True    output
             'emb': emb, # but l2 normalized if l2_normalized=True
             'regularized_z': quantized,
             'bottleneck_rep': q_indices,

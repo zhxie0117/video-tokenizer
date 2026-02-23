@@ -41,7 +41,7 @@ class OutputLayer(nn.Module):
         return x
 
 
-@register('larp_tokenizer')
+@register('larp_tokenizer_ablation')
 class LARPTokenizer(nn.Module, PyTorchModelHubMixin):
     output_format = 'bcthw'
     def __init__(
@@ -480,6 +480,5 @@ class LARPTokenizer(nn.Module, PyTorchModelHubMixin):
         encode_output = self.encode(data)
         pred_frames = self.decode(encode_output['encoded']).contiguous() # [b, c, t, h, w]
         return_dict = {'pred_frames': pred_frames, **encode_output}
-
         return return_dict
 

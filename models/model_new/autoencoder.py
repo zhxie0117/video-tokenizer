@@ -49,7 +49,7 @@ class AutoEncoder(nn.Module):
         token_size = 6
 
         self.encoder = Encoder(
-            model_size='base',
+            model_size='small',
             patch_size=[4, 8, 8],
             in_channels=3,
             out_channels=token_size,
@@ -58,7 +58,7 @@ class AutoEncoder(nn.Module):
         )
         self.quantize = FSQ(levels=[8, 8,8, 5, 5, 5])
         self.decoder = Decoder(
-            model_size='base',
+            model_size='small',
             patch_size=[4, 8, 8],
             in_channels=token_size,
             out_channels=3,
@@ -297,7 +297,7 @@ class AutoEncoder(nn.Module):
         token_size = 6
 
         self.encoder = Encoder1(
-            model_size='small',
+            model_size='base',
             patch_size=[4, 8, 8],
             in_channels=3,
             out_channels=token_size,
@@ -306,7 +306,7 @@ class AutoEncoder(nn.Module):
         )
         self.quantize = FSQ(levels=[8, 8,8, 5, 5, 5])
         self.decoder = Decoder1(
-            model_size='small',
+            model_size='base',
             patch_size=[4, 8, 8],
             in_channels=token_size,
             out_channels=3,
@@ -378,7 +378,7 @@ class AutoEncoder(nn.Module):
         token_size = 8
 
         self.encoder = Encoder1(
-            model_size='small',
+            model_size='base',
             patch_size=[4, 8, 8],
             in_channels=3,
             out_channels=token_size,
@@ -387,7 +387,7 @@ class AutoEncoder(nn.Module):
         )
         self.quantize = FSQ(levels=[8, 8,8,8,5, 5, 5, 5])
         self.decoder = Decoder1(
-            model_size='small',
+            model_size='base',
             patch_size=[4, 8, 8],
             in_channels=token_size,
             out_channels=3,

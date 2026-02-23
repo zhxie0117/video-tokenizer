@@ -22,7 +22,7 @@ class Encoder(nn.Module):
             patch_size=(4, 8, 8),
             in_channels=3,  # RGB
             out_channels=5,  # len(fsq_levels)
-            in_grid=(32, 256, 256),
+            in_grid=(16, 128, 128),
             out_tokens=2048,
     ):
         super().__init__()
@@ -1103,3 +1103,76 @@ class Decoder_unify(nn.Module):
 #         )
 
 #         return x_out
+
+
+
+
+class Encoder111(nn.Module):
+    def __init__(
+            self,
+            model_size="small",
+            patch_size=(4, 8, 8),
+            in_channels=3,  # RGB
+            out_channels=5,  # len(fsq_levels)
+            in_grid=(16, 128, 128),
+            out_tokens=1024,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.token_size = out_channels
+        self.in_channels = in_channels
+        self.out_tokens = out_tokens
+
+        self.grid = [x // y for x, y in zip(in_grid, patch_size)]
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+
+        self.freqs = get_freqs(out_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+        self.apply(init_weights)
+
+    def forward(self, x,query):
+        device = x.device
+        x = torch.cat([query, x], dim=1)
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+        x = x[:, :self.out_tokens]
+        return x
+
+
+class Decoder111(nn.Module):
+    def __init__(
+            self,
+            model_size="small",
+            patch_size=(4, 8, 8),
+            in_tokens=1024,
+            out_grid=(16, 128, 128),
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.in_tokens = in_tokens
+        self.grid = [x // y for x, y in zip(out_grid, patch_size)]
+        self.grid_size = math.prod(self.grid)
+        self.width, self.num_layers, self.heads, mlp_ratio = get_model_dims(model_size)
+
+        self.freqs = get_freqs(in_tokens, self.grid, head_dim=self.width // self.heads)
+
+        self.model_layers = ResidualAttentionBlock(
+            embed_dim=self.width,
+            heads=self.heads,
+            mlp_ratio=mlp_ratio,
+            num_layer=self.num_layers
+        )
+        self.apply(init_weights)
+
+    def forward(self, x,masktoken):
+
+        device = x.device
+        x = torch.cat([x, masktoken], dim=1)
+        x = self.model_layers(x, freqs=self.freqs.to(device))
+        x = x[:, self.in_tokens:]  # [B, grid_size, width]
+        return x

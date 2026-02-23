@@ -34,7 +34,7 @@ test_dataset:
     num_workers: $num_workers$
 
 model:
-  name: autoencoder_vfm
+  name: larp_tokenizer
   args:
     bottleneck:
       name: bottleneck
@@ -70,7 +70,8 @@ model:
     # token_num_first: 512
     # token_num_rest: 512
     bottleneck_token_num: 1024  # 128 + 256
-    
+    bottleneck_type: 'vq'          # 'vq' or 'fsq'    
+    train_type: 'mrope'            # 'mrope' or 'simple' 
     # --- Dimensions ---
     input_size: 128            # 根据测试代码设定          17
     frame_num: $frame_num$             # 1 (First) + 16 (Rest)
@@ -116,7 +117,7 @@ loss:
     disc_self_start: -1
     pixelloss_weight: 1.0
     perceptual_weight: 1.0
-    pixel_loss: 'l2'
+    pixel_loss: 'l1'
     perceptual_loss: 'lpips'
     perceptual_fp16: false
     lecam_weight: 0.001

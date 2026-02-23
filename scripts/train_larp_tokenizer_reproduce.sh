@@ -4,7 +4,7 @@
 python3 \
     train.py --cfg cfgs/larp_tokenizer.yaml \
     --manualSeed 66667 --tag default \
-    --csv_file ucf101_train.csv --out_path save/larp_tokenizer0215sem/ \
+    --csv_file ucf101_train.csv --out_path save/larp_tokenizer0222larpmrope/ \
     --name larp_tokenizer -b 16 -j 16 \
     --frame_num 16 --input_size 128   \
     --opts \

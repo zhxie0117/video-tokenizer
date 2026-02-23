@@ -14,5 +14,6 @@ from .model_dualpatch import autoencoder as autoencoder_dualpatch
 from .model_cnnvit import autoencoder as autoencoder_cnnvit
 from .model_cnnvit import auto1 as autoencoder_cnnvit1
 from .model_sem import auto1 as autoencoder_sem
+from . import larp_sem
 def get_model_cls(name):
     return models[name]

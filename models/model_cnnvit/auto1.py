@@ -333,9 +333,14 @@ class VJepaAlignerV3(nn.Module):
         # t_tok_n = F.normalize(t_tok, dim=-1, eps=1e-6)
         s_proto = self.pool(s_tok)
         t_proto = self.pool(t_tok)
-        Gs = gram_matrix(s_proto, normalize_tokens=True)
-        Gt = gram_matrix(t_proto, normalize_tokens=True)
-        gram_loss = F.mse_loss(Gs, Gt)
+
+
+
+        # Gs = gram_matrix(s_proto, normalize_tokens=True)
+        # Gt = gram_matrix(t_proto, normalize_tokens=True)
+
+
+        gram_loss = F.mse_loss(s_proto, t_proto)
         #print(f"Gram loss: {gram_loss.item():.4f}, PCA subspace loss: {pca_loss.item():.4f}")
         loss = self.gram_weight * gram_loss
         return loss, {"gram_loss": gram_loss.detach()}
@@ -379,7 +384,7 @@ class AutoEncoder1(nn.Module):
 
         # --- Student ---
         self.encoder = Encoder(
-            model_size="base_thin",
+            model_size="small",
             patch_size=[4, 8, 8],
             in_channels=3,
             out_channels=token_size,
@@ -388,7 +393,7 @@ class AutoEncoder1(nn.Module):
         )
         self.quantize = FSQ(levels=[8, 8, 8, 5, 5, 5])
         self.decoder = Decoder(
-            model_size="base_thin",
+            model_size="small",
             patch_size=[4, 8, 8],
             in_channels=token_size,
             out_channels=3,
