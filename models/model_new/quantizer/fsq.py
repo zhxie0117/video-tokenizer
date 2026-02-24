@@ -133,3 +133,98 @@ class FSQ(Module):
             codes = codes.to(orig_dtype)
 
         return codes, {'indices': indices}
+    
+
+
+
+
+
+
+
+from einops import rearrange
+import numpy as np
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class VectorQuantizer(nn.Module):
+    def __init__(self, n_embed, embed_dim, l2_norm, beta, input_format='bchw', predefined_codebook='/data2/zhxie/myproject/bsq-vit/cache/leech_lattices_normalized.npy', freeze_codebook=True):
+        super().__init__()
+
+        self.n_embed = n_embed
+        self.embed_dim = embed_dim
+        self.l2_norm = l2_norm
+        self.beta = beta
+        assert input_format in ['bchw', 'blc']
+        self.input_format = input_format
+
+        self.embedding = nn.Embedding(n_embed, embed_dim)
+        self.embedding.weight.data.uniform_(-1 / n_embed, 1 / n_embed)
+        self.bits_per_index = int(np.ceil(np.log2(n_embed)))
+
+        if predefined_codebook is not None:
+            predefined_codebook = torch.from_numpy(np.load(predefined_codebook))
+            assert predefined_codebook.shape == (n_embed, embed_dim), 'Predefined codebook has incorrect shape'
+            self.embedding.weight.data.copy_(predefined_codebook)
+            if freeze_codebook:
+                print(f"Freezing codebook weights. {self.embedding.weight.shape=}")
+                self.embedding.weight.requires_grad = False
+            else:
+                print(f"Initializing the codebook from {predefined_codebook}, and the codebook is trainable.")
+                self.embedding.weight.requires_grad = True
+
+    def forward(self, z):
+        batch = z.shape[0]
+        if self.input_format == 'bchw':
+            z = rearrange(z, 'b c h w -> b h w c')
+
+        if self.l2_norm:
+            z = F.normalize(z, dim=-1)
+            z_flatten = z.reshape(-1, self.embed_dim)
+            embedding_weight = F.normalize(self.embedding.weight, dim=-1)
+            d = -z_flatten @ embedding_weight.t()
+        else:
+            z_flatten = z.reshape(-1, self.embed_dim)
+            d = torch.sum(z_flatten ** 2, dim=1, keepdim=True) + torch.sum(self.embedding.weight ** 2, dim=1) - 2 * z_flatten @ self.embedding.weight.t()
+
+        min_encoding_indices = torch.argmin(d.detach(), dim=1)
+        if not self.training:
+            used_codes = torch.unique(min_encoding_indices, return_counts=False)
+        else:
+            used_codes = None
+        cb_usage = torch.bincount(min_encoding_indices.long(), minlength=self.n_embed).float()
+        cb_entropy = self.get_entropy(cb_usage)
+
+        z_q = self.embedding(min_encoding_indices).view(z.shape)
+        if self.l2_norm:
+            z_q = F.normalize(z_q, dim=-1)
+
+        # fix the issue with loss scaling
+        # loss weight should not associate with the dimensionality of words
+        # loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + torch.mean((z_q - z.detach()) ** 2)
+        loss = self.beta * torch.mean(((z_q.detach() - z) ** 2).sum(dim=-1)) + torch.mean(((z_q - z.detach()) ** 2).sum(dim=-1))
+
+        z_q = z + (z_q - z).detach()
+        if self.input_format == 'bchw':
+            z_q = rearrange(z_q, 'b h w c -> b c h w')
+        returndict={'output': z_q, 'loss_codebook': loss}
+        return returndict
+
+    def get_entropy(self, count, eps=1e-4):
+        probs = (count + eps) / (count + eps).sum()
+        H = -(probs * torch.log(probs)).sum()
+        return H
+
+
+    def get_codebook_entry(self, indices):
+        z_q = self.embedding(indices)
+        if self.l2_norm:
+            z_q = F.normalize(z_q, dim=-1)
+
+        if self.input_format == 'bchw':
+            h = w = int(z_q.shape[1] ** 0.5)
+            assert h * w == z_q.shape[1], 'Invalid sequence length'
+            z_q = rearrange(z_q, 'b (h w) c -> b c h w', h=h)
+        return z_q

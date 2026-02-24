@@ -19,7 +19,7 @@ from .embed import (PatchEmbed3D, VideoPatchEmbed,
 from vjepa2.src.models.vision_transformer import vit_large_rope
 import vjepa2.src.datasets.utils.video.transforms as video_transforms
 import vjepa2.src.datasets.utils.video.volume_transforms as volume_transforms
-from models.model_new.quantizer.fsq import FSQ
+from models.model_new.quantizer.fsq import FSQ,VectorQuantizer
 from models.model_new.base.blocks import Encoder111, Decoder111
 def get_orig_module(module):
     if hasattr(module, 'module'):
@@ -219,7 +219,7 @@ class LARPTokenizer(nn.Module, PyTorchModelHubMixin):
         elif self.bottleneck_type == 'fsq':
             self.fsq_in_linear = nn.Linear(self.encoder_hidden_size, 6)
             self.fsq_out_linear = nn.Linear(6, self.decoder_hidden_size)
-            self.fsq_norm = nn.LayerNorm(6)
+            self.fsq_norm = nn.LayerNorm(self.encoder_hidden_size)
             nn.init.normal_(self.fsq_in_linear.weight, std=0.02) 
             nn.init.constant_(self.fsq_in_linear.bias, 0)
     
@@ -227,6 +227,11 @@ class LARPTokenizer(nn.Module, PyTorchModelHubMixin):
             nn.init.normal_(self.fsq_in_linear.weight, std=0.02) 
             nn.init.constant_(self.fsq_out_linear.bias, 0)
             self.bottleneck = FSQ(levels=[8, 8,8, 5, 5, 5])
+        elif self.bottleneck_type == 'sq':
+            self.sq_in_linear = nn.Linear(self.encoder_hidden_size, 24)
+            self.sq_out_linear = nn.Linear(24, self.decoder_hidden_size)
+            self.bottleneck = VectorQuantizer(n_embed=196_560, embed_dim=24, l2_norm=True, beta=0.25, input_format='blc')
+
 
 
         self.final_layer = OutputLayer(decoder_hidden_size, decoder_temporal_patch_size, decoder_patch_size, self.out_channels)
@@ -405,8 +410,9 @@ class LARPTokenizer(nn.Module, PyTorchModelHubMixin):
             q_emb = self.get_encoder_latent_query_embed().repeat(b, 1, 1) # (b, n, d)
             z = self.encoder(x, q_emb)
         if self.bottleneck_type == 'fsq':
-            z = self.fsq_in_linear(z)
             z = self.fsq_norm(z)
+            z = self.fsq_in_linear(z)
+            #z = self.fsq_norm(z)
             z,z_dict= self.bottleneck(z)
             z = self.fsq_out_linear(z)
             return {'encoded': z}
@@ -414,6 +420,12 @@ class LARPTokenizer(nn.Module, PyTorchModelHubMixin):
             bottleneck_out = self.bottleneck(z)
             z= bottleneck_out.pop('output')
             return {'encoded': z, **bottleneck_out}
+        elif self.bottleneck_type == 'sq':
+            z = self.sq_in_linear(z)
+            bottleneck_out = self.bottleneck(z)
+            z= bottleneck_out.pop('output')
+            z = self.sq_out_linear(z)
+            return {'encoded': z,**bottleneck_out}
 
     def encode_eval(self, x):
         x_tokens = self.x_embedder(x)

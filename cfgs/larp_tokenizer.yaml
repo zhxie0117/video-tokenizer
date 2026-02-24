@@ -39,7 +39,7 @@ model:
     bottleneck:
       name: bottleneck
       args:
-        bottleneck_dim: 16
+        bottleneck_dim: 24
         norm: 'none'
         regularizer:
           name: vq
@@ -70,8 +70,8 @@ model:
     # token_num_first: 512
     # token_num_rest: 512
     bottleneck_token_num: 1024  # 128 + 256
-    bottleneck_type: 'vq'          # 'vq' or 'fsq'    
-    train_type: 'mrope'            # 'mrope' or 'simple' 
+    bottleneck_type: 'sq'          # 'vq' or 'fsq'    
+    train_type: 'simple'            # 'mrope' or 'simple' 
     # --- Dimensions ---
     input_size: 128            # 根据测试代码设定          17
     frame_num: $frame_num$             # 1 (First) + 16 (Rest)
