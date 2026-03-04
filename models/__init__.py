@@ -5,6 +5,7 @@ from . import loss
 from . import larp_ar
 from . import gptc
 from . import larp_tokenizer
+from . import larp_tokenizer_vfm
 from .model import autoencoder
 from .model_titok import titok
 from .model_new import autoencoder as autoencoder_new

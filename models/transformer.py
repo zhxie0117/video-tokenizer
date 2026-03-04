@@ -68,3 +68,44 @@ class TransformerEncoderParallel(nn.Module):
 
         h = h[:, -query_length:, :]
         return h
+
+
+
+
+@register('DEC')
+class DEC(nn.Module):
+    def __init__(
+        self,
+        dim,
+        depth,
+        n_head,
+        head_dim,
+        ff_dim=None,
+        dropout=0.0
+    ):
+        super().__init__()
+        self.is_encoder_decoder = True
+        assert ff_dim is None
+        assert dim == head_dim * n_head
+        self.blocks = nn.ModuleList()
+        for _ in range(depth):
+            self.blocks.append(
+                BlockTimm(
+                    dim=dim,
+                    num_heads=n_head,
+                    mlp_ratio=4,
+                    qkv_bias=False,
+                    proj_drop=dropout,
+                    attn_drop=dropout,
+                )
+            )
+
+    def forward(self,query):
+        query_length = query.size(1)
+        h=query
+
+        for block in self.blocks:
+            h = block(h)
+
+        #h = h[:, -query_length:, :]
+        return h

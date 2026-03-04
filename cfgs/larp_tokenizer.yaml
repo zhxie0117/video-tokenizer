@@ -34,12 +34,12 @@ test_dataset:
     num_workers: $num_workers$
 
 model:
-  name: larp_tokenizer
+  name: larp_tokenizer_vfm_noquant
   args:
     bottleneck:
       name: bottleneck
       args:
-        bottleneck_dim: 24
+        bottleneck_dim: 24  #sq的话改成24
         norm: 'none'
         regularizer:
           name: vq
@@ -72,15 +72,16 @@ model:
     bottleneck_token_num: 1024  # 128 + 256
     bottleneck_type: 'sq'          # 'vq' or 'fsq'    
     train_type: 'simple'            # 'mrope' or 'simple' 
+    use_pe: 'yes'
     # --- Dimensions ---
-    input_size: 128            # 根据测试代码设定          17
+    input_size: 256            # 根据测试代码设定          17
     frame_num: $frame_num$             # 1 (First) + 16 (Rest)
     
     # --- Patch Sizes ---
-    temporal_patch_size: 4     # 仅作用于后续帧
-    patch_size: 8
-    decoder_temporal_patch_size: 4
-    decoder_patch_size: 8
+    temporal_patch_size: 2     # 仅作用于后续帧
+    patch_size: 16
+    decoder_temporal_patch_size: 2
+    decoder_patch_size: 16
     in_channels: 3
 
     # --- Transformer Architecture ---
@@ -91,8 +92,8 @@ model:
     decoder_hidden_size: 768
     encoder_num_heads: 12
     decoder_num_heads: 12
-    encoder_depth: 6           # 根据测试代码设定为 6
-    decoder_depth: 6           # 根据测试代码设定为 6
+    encoder_depth: 12           # 根据测试代码设定为 6
+    decoder_depth: 12          # 根据测试代码设定为 6
 
     learned_encoder_patch_pe: false
     learned_encoder_latent_query_embed: true
@@ -122,7 +123,7 @@ loss:
     perceptual_fp16: false
     lecam_weight: 0.001
     disc_loss: 'ns_smooth'
-    disc_weight: 0.2
+    disc_weight: 0.3
     r1_gp_weight: 0.0
     d_update_freq: 5
     spectral_norm: false
@@ -163,7 +164,7 @@ ema_decay: '_'
 use_amp: false
 amp_dtype: 'float16'
 compile: false
-compile_mode: 'default' # 'default or 'reduce-overhead', or 'max-autotune'
+compile_mode: 'default' # 'default or 'reduce-overhead', or 'max-autotune'       decoder_temporal_patch_size
 flash_attn: false
 
 

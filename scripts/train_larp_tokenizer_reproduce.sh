@@ -4,9 +4,9 @@
 python3 \
     train.py --cfg cfgs/larp_tokenizer.yaml \
     --manualSeed 66667 --tag default \
-    --csv_file ucf101_train.csv --out_path save/larp_tokenizer0224larpsq/ \
-    --name larp_tokenizer -b 16 -j 16 \
-    --frame_num 16 --input_size 128   \
+    --csv_file ucf101_train.csv --out_path save/larp_tokenizer0304/ \
+    --name larp_tokenizer -b 8 -j 8 \
+    --frame_num 16 --input_size 256   \
     --opts \
     test_dataset.csv_paths.ucf101_val ucf101_val.csv \
     model.args.bottleneck_token_num 1024 \

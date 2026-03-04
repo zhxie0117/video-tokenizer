@@ -367,13 +367,13 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 rec_loss = input_frames.new_zeros(1)
 
             if self.perceptual_weight > 0:
-                # p_loss = self.perceptual_loss(
-                #     input_frames, reconstruction_frames, normalize=True
-                # )
-                p_loss_raw = self.perceptual_loss(
+                p_loss = self.perceptual_loss(
                     input_frames, reconstruction_frames, normalize=True
                 )
-                p_loss = torch.mean(p_loss_raw) # 用于优化的标量 Loss
+                # p_loss_raw = self.perceptual_loss(
+                #     input_frames, reconstruction_frames, normalize=True
+                # )
+                # p_loss = torch.mean(p_loss_raw) # 用于优化的标量 Loss
             else:
                 p_loss = input_frames.new_zeros(1)
 
@@ -396,7 +396,7 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 g_loss_weight = g_loss_weight.item()
 
             loss = nll_loss + g_loss_weight * g_loss
-            p_loss_per_sample = p_loss_raw.view(B, -1).mean(dim=1)
+            p_loss_per_sample = 0
             info_dict = {
                 'rec_loss': rec_loss.mean().item(),
                 'perceptual_loss': p_loss.mean().item(),

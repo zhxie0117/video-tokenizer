@@ -399,7 +399,7 @@ class AutoEncoder(nn.Module):
         token_size = 6  # student_dim
         # --- Student ---
         self.tokenizer_encoder = TokenizerEncoder1D(
-            model_size='base_thin',
+            model_size='base',
             in_channels=1280,
             out_channels=token_size,
             in_tokens=2048,
@@ -409,7 +409,7 @@ class AutoEncoder(nn.Module):
         self.quantize = FSQ(levels=[8, 8, 8, 5, 5, 5])
 
         self.tokenizer_decoder = TokenizerDecoder1D(
-            model_size='base_thin',
+            model_size='base',
             in_channels=token_size,
             in_tokens=num_latent_tokens,
             out_tokens=2048,
@@ -437,16 +437,15 @@ class AutoEncoder(nn.Module):
         self._init_vjepa2_teacher(student_dim=token_size)
         self.aligner= nn.Linear(decoder_1d_width, 1280) 
         self.dicklinear= nn.Linear(1280, decoder_1d_width)
+
+        self.teacher_layer_norms = nn.ModuleList([
+            nn.LayerNorm(1280, eps=1e-6) for _ in range(4)
+        ])
         self.fusion_proj = nn.Sequential(
-            nn.LayerNorm(1280*4),      # 关键：先归一化，平衡不同层的数值范围
+            #nn.LayerNorm(1280*4),      # 关键：先归一化，平衡不同层的数值范围
             nn.Linear(1280*4, 1280), # 投影回 1280
             nn.GELU()                      # 可选：增加非线性，通常有助于特征混合
         )
-        # self.vjepa2_fuser = GatedLinearLayerFusion(
-        #     dim=1280,  # default teacher dim; will adjust to teacher.embed_dim at init
-        #     num_layers=4,
-
-        # )
 
     def _init_vjepa2_teacher(self, student_dim: int):
         if (self.vjepa2_encoder_ckpt is None) or (not os.path.exists(self.vjepa2_encoder_ckpt)):
@@ -474,7 +473,6 @@ class AutoEncoder(nn.Module):
         print(f"[VJEPA2] Teacher loaded. embed_dim={teacher_dim}, img_size={self.vjepa2_img_size}, num_frames={self.vjepa2_num_frames}")
         self.teacher_transform = build_vjepa2_video_transform(img_size=self.vjepa2_img_size)
         self.prior_model = None 
-
 
     def _preprocess_for_vjepa2(self, x: torch.Tensor):
         """
@@ -521,18 +519,18 @@ class AutoEncoder(nn.Module):
             if isinstance(f, (tuple, list)):
                 f = f[0]
             feats_list.append(f) # List of [B, N, D]
-
+        normed_feats = []
+        for i, feat in enumerate(feats_list):
+            # feat: [B, N, 1280]
+            normed_feats.append(self.teacher_layer_norms[i](feat))
         # 2. 拼接 (Concatenation)
         # [B, N, D] * 4 -> [B, N, 4*D]
         # 必须转 float 以便进行 LayerNorm 和 Linear 计算（避免 bf16 溢出或精度问题）
-        cat_feats = torch.cat(feats_list, dim=-1).float() 
-
+        cat_feats = torch.cat(normed_feats, dim=-1).float() 
         # 3. 线性映射融合 (Linear Projection)
         # [B, N, 4*D] -> [B, N, 1280]
         fused_feats = self.fusion_proj(cat_feats)
-
         return fused_feats
-
         # t_feats = self.teacher_model(t_input)
         # fused = self.vjepa2_fuser(t_feats)  # [B,N,D]
         # return fused.float()
@@ -568,207 +566,18 @@ class AutoEncoder(nn.Module):
         pred_video = self.video_decoder(decoded_feats)          # [B, 3, 16, 128, 128]
         return_dict = {"pred_frames": pred_video.contiguous()}
 
-        align_decoder_feats = self.aligner(decoded_feats.float())  # [B, 2048, 1024]
-        align_loss= F.mse_loss(align_decoder_feats, vfm_feats.float())  # 对齐损失：decoder_feats vs teacher_feats
-        return_dict["align_loss"] = 0.5 * align_loss
+        align_student = self.aligner(decoded_feats.float()) # [B, 2048, 1280]
+        target = vfm_feats.float().detach()
+        student_flat = align_student.reshape(-1, 1280)
+        target_flat = target.reshape(-1, 1280)
+        cos_loss = 1.0 - F.cosine_similarity(student_flat, target_flat, dim=-1).mean()
+        mse_loss = F.mse_loss(align_student, target)
+        # F. 组合 Loss
+        # 推荐权重：Cos为主 (1.0)，MSE为辅 (0.1 或 0.2)
+        return_dict["align_loss"] = 1.0 * cos_loss + 0.1 * mse_loss
 
         return return_dict
     
-
-
-
-
-
-@register("autoencoder_vfm2")
-class AutoEncoder(nn.Module):
-    def __init__(
-        self,
-        bottleneck,
-        prior_model,
-        num_latent_tokens=1024,
-        input_size=256,
-
-        # --- VJEPA2 Teacher (PyTorch-only) ---
-        use_vjepa_loss=True,
-        vjepa2_encoder_ckpt="/data2/zhxie/myproject/LARP/vjepackpt/vith.pt",  # 本地 .pth/.tar，包含 ckpt["encoder"]
-        vjepa2_img_size=256,                    # 与所选 VJEPA2 权重对应的 crop_size（如 384/256）
-        vjepa2_num_frames=16,                   # VJEPA2 encoder 构建时 num_frames
-        vjepa2_sample_strategy="repeat",        # "repeat" | "uniform"
-        vjepa2_tubelet_size=2,                  # VJEPA2 常见为2（demo里采样到64帧=128/2）
-        vjepa2_patch_size=16,                   # ViT-G 常见 patch=16（用于 grid 计算）
-        vjepa2_use_bf16=False,                  # teacher 用 bf16 可省显存
-
-        **kwargs,
-    ):
-        super().__init__()
-
-        self.vfm_grid = (8, 16, 16)  # student tokens grid: t,h,w (4*16*16=1024)
-        token_size = 6  # student_dim
-        # --- Student ---
-        self.tokenizer_encoder = TokenizerEncoder1D(
-            model_size='small',
-            in_channels=1280,
-            out_channels=token_size,
-            in_tokens=2048,
-            out_tokens=num_latent_tokens,
-            in_grid=self.vfm_grid,
-        )
-        self.quantize = FSQ(levels=[8, 8, 8, 5, 5, 5])
-
-        self.tokenizer_decoder = TokenizerDecoder1D(
-            model_size='small',
-            in_channels=token_size,
-            in_tokens=num_latent_tokens,
-            out_tokens=2048,
-            out_grid=self.vfm_grid,
-        )
-        decoder_1d_width = self.tokenizer_decoder.output_dim
-        
-        # Video Decoder: width → RGB video
-        self.video_decoder = VideoDecoder(
-            model_size='base',
-            in_channels=decoder_1d_width,
-            out_channels=3,
-            num_tokens=2048,
-            token_grid=self.vfm_grid,
-            patch_size=[2, 16, 16],  # 与 tokenizer encoder patch size 对齐（即 ViT tubelet/patch size）
-        )
-        self.teacher_model = None
-        self.vjepa2_encoder_ckpt = vjepa2_encoder_ckpt
-        self.vjepa2_img_size = int(vjepa2_img_size)
-        self.vjepa2_num_frames = int(vjepa2_num_frames)
-        self.vjepa2_sample_strategy = str(vjepa2_sample_strategy)
-        self.vjepa2_tubelet_size = int(vjepa2_tubelet_size)
-        self.vjepa2_patch_size = int(vjepa2_patch_size)
-        self.vjepa2_use_bf16 = bool(vjepa2_use_bf16)
-        self._init_vjepa2_teacher(student_dim=token_size)
-        self.aligner= nn.Linear(decoder_1d_width, 1280) 
-        self.dicklinear= nn.Linear(1280, decoder_1d_width)
-        self.vjepa2_fuser = SemanticPyramidFusion(
-            dim=1280,
-            grid_size=self.vfm_grid
-        )
-
-    def _init_vjepa2_teacher(self, student_dim: int):
-        if (self.vjepa2_encoder_ckpt is None) or (not os.path.exists(self.vjepa2_encoder_ckpt)):
-            print(f"ERROR: vjepa2_encoder_ckpt not found: {self.vjepa2_encoder_ckpt}")
-            self.use_vjepa_loss = False
-            return
-        print("[VJEPA2] Initializing teacher (PyTorch) ...")
-        # vit giant rope variant used in demo
-        self.teacher_model = vit_huge_rope(
-            img_size=(self.vjepa2_img_size, self.vjepa2_img_size),
-            num_frames=self.vjepa2_num_frames,
-            out_layers=[8, 16, 24, 31],
-        )
-        load_pretrained_vjepa2_pt_weights(self.teacher_model, self.vjepa2_encoder_ckpt)
-        self.teacher_model.eval()
-        for p in self.teacher_model.parameters():
-            p.requires_grad = False
-
-        if self.vjepa2_use_bf16:
-            self.teacher_model = self.teacher_model.to(dtype=torch.bfloat16)
-
-        teacher_dim = getattr(self.teacher_model, "embed_dim", None)
-        if teacher_dim is None:
-            raise AttributeError("teacher_model has no attribute embed_dim; please check VJEPA2 model class.")
-        print(f"[VJEPA2] Teacher loaded. embed_dim={teacher_dim}, img_size={self.vjepa2_img_size}, num_frames={self.vjepa2_num_frames}")
-        self.teacher_transform = build_vjepa2_video_transform(img_size=self.vjepa2_img_size)
-        self.prior_model = None 
-
-
-    def _preprocess_for_vjepa2(self, x: torch.Tensor):
-        """
-        x: [B, 3, T, H, W], 期望是 0..1 的浮点
-        输出：x_teacher [B, 3, T', Ht, Wt]，已做 resize/crop + imagenet normalize
-        """
-        if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-            x = x.float()#B,3,T,H,W
-        outs = []
-        for b in range(x.shape[0]):
-            vid_tchw = x[b].permute(1, 0, 2, 3).contiguous()  # [T,C,H,W]
-            out_cthw = self.teacher_transform(vid_tchw)       # [C,T,Ht,Wt]
-            outs.append(out_cthw)
-        x_teacher = torch.stack(outs, dim=0)  # [B,C,T,Ht,Wt]
-
-        # dtype 对齐到 teacher
-        if self.teacher_model is not None:
-            target_dtype = next(self.teacher_model.parameters()).dtype
-            x_teacher = x_teacher.to(dtype=target_dtype)
-
-        return x_teacher
-
-    @torch.no_grad()
-    def _extract_vfm_features(self, x: torch.Tensor):
-        """
-        x: raw video [B, 3, T, H, W]
-        Returns: [B, num_vfm_tokens, D_teacher]
-        """
-        assert self.teacher_model is not None, "Teacher model is required for encoding."
-        if next(self.teacher_model.parameters()).device != x.device:
-            self.teacher_model.to(x.device)
-        t_input = self._preprocess_for_vjepa2(x)
-        # 1. 获取特征列表
-        # 假设 teacher 返回 [feat_l8, feat_l16, feat_l24, feat_l32]
-        t_out = self.teacher_model(t_input)
-
-        if not isinstance(t_out, (list, tuple)):
-            # 兼容性处理：如果只返回了一个 Tensor，包一层
-            t_out = [t_out]
-
-        # 确保只取需要的 Tensor（有些实现可能返回 tuple）
-        feats_list = []
-        for f in t_out:
-            if isinstance(f, (tuple, list)):
-                f = f[0]
-            feats_list.append(f) # List of [B, N, D]
-
-        fused = self.vjepa2_fuser(feats_list)
-
-        return fused
-
-        # t_feats = self.teacher_model(t_input)
-        # fused = self.vjepa2_fuser(t_feats)  # [B,N,D]
-        # return fused.float()
-
-    def encode(self, x, **kwargs):
-        vfm_feats = self._extract_vfm_features(x)           # [B, 2048, D_teacher]
-        latent = self.tokenizer_encoder(vfm_feats)           # [B, 1024, token_size]
-        latent_q, q_dict = self.quantize(latent)              # [B, 1024, token_size]
-        return latent_q, q_dict
-
-    def decode(self, x_q):
-        decoded_feats = self.tokenizer_decoder(x_q)           # [B, 2048, width]
-        pred_video = self.video_decoder(decoded_feats)         # [B, 3, T, H, W]
-        return pred_video
-
-    # ------------------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------------------
-    def forward(self, x):
-        """
-        x: [B, 3, 16, 128, 128]
-        """
-        # --- VFM feature extraction (frozen teacher) ---
-        vfm_feats = self._extract_vfm_features(x)             # [B, 2048, D_teacher]
-
-        # --- 1D Tokenizer encode → quantize ---
-        latent = self.tokenizer_encoder(vfm_feats)             # [B, 1024, token_size]
-        latent_q, q_dict = self.quantize(latent)                # [B, 1024, token_size]
-
-        # --- 1D Tokenizer decode → video decode ---
-        decoded_feats = self.tokenizer_decoder(latent_q)        # [B, 2048, width]
-
-
-        #decoded_feats=self.dicklinear(vfm_feats)#test video decoder with teacher features, should be 2048→decoder_1d_width
-        pred_video = self.video_decoder(decoded_feats)          # [B, 3, 16, 128, 128]
-        return_dict = {"pred_frames": pred_video.contiguous()}
-
-        align_decoder_feats = self.aligner(decoded_feats.float())  # [B, 2048, 1024]
-        align_loss= F.mse_loss(align_decoder_feats, vfm_feats.float())  # 对齐损失：decoder_feats vs teacher_feats
-        return_dict["align_loss"] = 0.5 * align_loss
-
-        return return_dict
 
 
 
@@ -800,7 +609,7 @@ class AutoEncoder(nn.Module):
         token_size = 6  # student_dim
         # --- Student ---
         self.tokenizer_encoder = TokenizerEncoder1D(
-            model_size='base_thin',
+            model_size='base',
             in_channels=1280,
             out_channels=token_size,
             in_tokens=2048,
@@ -809,7 +618,7 @@ class AutoEncoder(nn.Module):
         )
         self.quantize = FSQ(levels=[8, 8, 8, 5, 5, 5])
         self.tokenizer_decoder = TokenizerDecoder1D(
-            model_size='base_thin',
+            model_size='base',
             in_channels=token_size,
             in_tokens=num_latent_tokens,
             out_tokens=2048,
@@ -921,7 +730,6 @@ class AutoEncoder(nn.Module):
         """
         # --- VFM feature extraction (frozen teacher) ---
         vfm_feats = self._extract_vfm_features(x)             # [B, 2048, D_teacher]
-
         # --- 1D Tokenizer encode → quantize ---
         latent = self.tokenizer_encoder(vfm_feats)             # [B, 1024, token_size]
         latent_q, q_dict = self.quantize(latent)                # [B, 1024, token_size]
@@ -937,6 +745,19 @@ class AutoEncoder(nn.Module):
 
         return return_dict
     
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 @register("autoencoder_vfm_fianllayer")
@@ -965,7 +786,7 @@ class AutoEncoder(nn.Module):
         token_size = 6  # student_dim
         # --- Student ---
         self.tokenizer_encoder = TokenizerEncoder1D(
-            model_size='base_thin',
+            model_size='base',
             in_channels=1280,
             out_channels=token_size,
             in_tokens=2048,
@@ -974,7 +795,7 @@ class AutoEncoder(nn.Module):
         )
         self.quantize = FSQ(levels=[8, 8, 8, 5, 5, 5])
         self.tokenizer_decoder = TokenizerDecoder1D(
-            model_size='base_thin',
+            model_size='base',
             in_channels=token_size,
             in_tokens=num_latent_tokens,
             out_tokens=2048,
@@ -1243,3 +1064,201 @@ class AutoEncoder(nn.Module):
         return_dict = {"pred_frames": pred_video.contiguous()}
 
         return return_dict
+    
+
+
+
+
+@register("autoencoder_vfm2")
+class AutoEncoder(nn.Module):
+    def __init__(
+        self,
+        bottleneck,
+        prior_model,
+        num_latent_tokens=1024,
+        input_size=256,
+
+        # --- VJEPA2 Teacher (PyTorch-only) ---
+        use_vjepa_loss=True,
+        vjepa2_encoder_ckpt="/data2/zhxie/myproject/LARP/vjepackpt/vith.pt",  # 本地 .pth/.tar，包含 ckpt["encoder"]
+        vjepa2_img_size=256,                    # 与所选 VJEPA2 权重对应的 crop_size（如 384/256）
+        vjepa2_num_frames=16,                   # VJEPA2 encoder 构建时 num_frames
+        vjepa2_sample_strategy="repeat",        # "repeat" | "uniform"
+        vjepa2_tubelet_size=2,                  # VJEPA2 常见为2（demo里采样到64帧=128/2）
+        vjepa2_patch_size=16,                   # ViT-G 常见 patch=16（用于 grid 计算）
+        vjepa2_use_bf16=False,                  # teacher 用 bf16 可省显存
+
+        **kwargs,
+    ):
+        super().__init__()
+
+        self.vfm_grid = (8, 16, 16)  # student tokens grid: t,h,w (4*16*16=1024)
+        token_size = 6  # student_dim
+        # --- Student ---
+        self.tokenizer_encoder = TokenizerEncoder1D(
+            model_size='small',
+            in_channels=1280,
+            out_channels=token_size,
+            in_tokens=2048,
+            out_tokens=num_latent_tokens,
+            in_grid=self.vfm_grid,
+        )
+        self.quantize = FSQ(levels=[8, 8, 8, 5, 5, 5])
+
+        self.tokenizer_decoder = TokenizerDecoder1D(
+            model_size='small',
+            in_channels=token_size,
+            in_tokens=num_latent_tokens,
+            out_tokens=2048,
+            out_grid=self.vfm_grid,
+        )
+        decoder_1d_width = self.tokenizer_decoder.output_dim
+        
+        # Video Decoder: width → RGB video
+        self.video_decoder = VideoDecoder(
+            model_size='base',
+            in_channels=decoder_1d_width,
+            out_channels=3,
+            num_tokens=2048,
+            token_grid=self.vfm_grid,
+            patch_size=[2, 16, 16],  # 与 tokenizer encoder patch size 对齐（即 ViT tubelet/patch size）
+        )
+        self.teacher_model = None
+        self.vjepa2_encoder_ckpt = vjepa2_encoder_ckpt
+        self.vjepa2_img_size = int(vjepa2_img_size)
+        self.vjepa2_num_frames = int(vjepa2_num_frames)
+        self.vjepa2_sample_strategy = str(vjepa2_sample_strategy)
+        self.vjepa2_tubelet_size = int(vjepa2_tubelet_size)
+        self.vjepa2_patch_size = int(vjepa2_patch_size)
+        self.vjepa2_use_bf16 = bool(vjepa2_use_bf16)
+        self._init_vjepa2_teacher(student_dim=token_size)
+        self.aligner= nn.Linear(decoder_1d_width, 1280) 
+        self.dicklinear= nn.Linear(1280, decoder_1d_width)
+        self.vjepa2_fuser = SemanticPyramidFusion(
+            dim=1280,
+            grid_size=self.vfm_grid
+        )
+
+    def _init_vjepa2_teacher(self, student_dim: int):
+        if (self.vjepa2_encoder_ckpt is None) or (not os.path.exists(self.vjepa2_encoder_ckpt)):
+            print(f"ERROR: vjepa2_encoder_ckpt not found: {self.vjepa2_encoder_ckpt}")
+            self.use_vjepa_loss = False
+            return
+        print("[VJEPA2] Initializing teacher (PyTorch) ...")
+        # vit giant rope variant used in demo
+        self.teacher_model = vit_huge_rope(
+            img_size=(self.vjepa2_img_size, self.vjepa2_img_size),
+            num_frames=self.vjepa2_num_frames,
+            out_layers=[8, 16, 24, 31],
+        )
+        load_pretrained_vjepa2_pt_weights(self.teacher_model, self.vjepa2_encoder_ckpt)
+        self.teacher_model.eval()
+        for p in self.teacher_model.parameters():
+            p.requires_grad = False
+
+        if self.vjepa2_use_bf16:
+            self.teacher_model = self.teacher_model.to(dtype=torch.bfloat16)
+
+        teacher_dim = getattr(self.teacher_model, "embed_dim", None)
+        if teacher_dim is None:
+            raise AttributeError("teacher_model has no attribute embed_dim; please check VJEPA2 model class.")
+        print(f"[VJEPA2] Teacher loaded. embed_dim={teacher_dim}, img_size={self.vjepa2_img_size}, num_frames={self.vjepa2_num_frames}")
+        self.teacher_transform = build_vjepa2_video_transform(img_size=self.vjepa2_img_size)
+        self.prior_model = None 
+
+
+    def _preprocess_for_vjepa2(self, x: torch.Tensor):
+        """
+        x: [B, 3, T, H, W], 期望是 0..1 的浮点
+        输出：x_teacher [B, 3, T', Ht, Wt]，已做 resize/crop + imagenet normalize
+        """
+        if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            x = x.float()#B,3,T,H,W
+        outs = []
+        for b in range(x.shape[0]):
+            vid_tchw = x[b].permute(1, 0, 2, 3).contiguous()  # [T,C,H,W]
+            out_cthw = self.teacher_transform(vid_tchw)       # [C,T,Ht,Wt]
+            outs.append(out_cthw)
+        x_teacher = torch.stack(outs, dim=0)  # [B,C,T,Ht,Wt]
+
+        # dtype 对齐到 teacher
+        if self.teacher_model is not None:
+            target_dtype = next(self.teacher_model.parameters()).dtype
+            x_teacher = x_teacher.to(dtype=target_dtype)
+
+        return x_teacher
+
+    @torch.no_grad()
+    def _extract_vfm_features(self, x: torch.Tensor):
+        """
+        x: raw video [B, 3, T, H, W]
+        Returns: [B, num_vfm_tokens, D_teacher]
+        """
+        assert self.teacher_model is not None, "Teacher model is required for encoding."
+        if next(self.teacher_model.parameters()).device != x.device:
+            self.teacher_model.to(x.device)
+        t_input = self._preprocess_for_vjepa2(x)
+        # 1. 获取特征列表
+        # 假设 teacher 返回 [feat_l8, feat_l16, feat_l24, feat_l32]
+        t_out = self.teacher_model(t_input)
+
+        if not isinstance(t_out, (list, tuple)):
+            # 兼容性处理：如果只返回了一个 Tensor，包一层
+            t_out = [t_out]
+
+        # 确保只取需要的 Tensor（有些实现可能返回 tuple）
+        feats_list = []
+        for f in t_out:
+            if isinstance(f, (tuple, list)):
+                f = f[0]
+            feats_list.append(f) # List of [B, N, D]
+
+        fused = self.vjepa2_fuser(feats_list)
+
+        return fused
+
+        # t_feats = self.teacher_model(t_input)
+        # fused = self.vjepa2_fuser(t_feats)  # [B,N,D]
+        # return fused.float()
+
+    def encode(self, x, **kwargs):
+        vfm_feats = self._extract_vfm_features(x)           # [B, 2048, D_teacher]
+        latent = self.tokenizer_encoder(vfm_feats)           # [B, 1024, token_size]
+        latent_q, q_dict = self.quantize(latent)              # [B, 1024, token_size]
+        return latent_q, q_dict
+
+    def decode(self, x_q):
+        decoded_feats = self.tokenizer_decoder(x_q)           # [B, 2048, width]
+        pred_video = self.video_decoder(decoded_feats)         # [B, 3, T, H, W]
+        return pred_video
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+    def forward(self, x):
+        """
+        x: [B, 3, 16, 128, 128]
+        """
+        # --- VFM feature extraction (frozen teacher) ---
+        vfm_feats = self._extract_vfm_features(x)             # [B, 2048, D_teacher]
+
+        # --- 1D Tokenizer encode → quantize ---
+        latent = self.tokenizer_encoder(vfm_feats)             # [B, 1024, token_size]
+        latent_q, q_dict = self.quantize(latent)                # [B, 1024, token_size]
+
+        # --- 1D Tokenizer decode → video decode ---
+        decoded_feats = self.tokenizer_decoder(latent_q)        # [B, 2048, width]
+
+
+        #decoded_feats=self.dicklinear(vfm_feats)#test video decoder with teacher features, should be 2048→decoder_1d_width
+        pred_video = self.video_decoder(decoded_feats)          # [B, 3, 16, 128, 128]
+        return_dict = {"pred_frames": pred_video.contiguous()}
+
+        align_decoder_feats = self.aligner(decoded_feats.float())  # [B, 2048, 1024]
+        align_loss= F.mse_loss(align_decoder_feats, vfm_feats.float())  # 对齐损失：decoder_feats vs teacher_feats
+        return_dict["align_loss"] = 0.5 * align_loss
+
+        return return_dict
+
+
+
